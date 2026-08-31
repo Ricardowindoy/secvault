@@ -1,0 +1,9 @@
+# 构建产物与缓存
+.gocache/
+.gomodcache/
+.gopath/
+/bin/
+*.test
+
+# demo 产物（大文件不入库）
+demo/out/
