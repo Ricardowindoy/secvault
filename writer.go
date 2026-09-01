@@ -48,6 +48,7 @@ type Writer struct {
 	pipeline *engine.Pipeline
 	manAEAD  crypto.AEAD
 	fileID   []byte
+	spec     layout.Spec
 	closed   bool
 }
 
@@ -85,11 +86,13 @@ func NewWriter(dst io.ReadWriteSeeker, masterKey []byte, opts ...WriterOption) (
 	}
 	var noncePfx [4]byte
 	copy(noncePfx[:], pfx)
+	spec := layout.SpecV2()
 	return &Writer{
 		dst:      dst,
-		pipeline: engine.NewPipeline(dst, aead, codecs, noncePfx, o.workers, o.inflight),
+		pipeline: engine.NewPipeline(dst, aead, codecs, noncePfx, o.workers, o.inflight, spec),
 		manAEAD:  manAEAD,
 		fileID:   fileID,
+		spec:     spec,
 	}, nil
 }
 
@@ -136,7 +139,8 @@ func (w *Writer) Close() error {
 		Nonce:   nonce,
 		Payload: w.manAEAD.Seal(nil, nonce, mb, nil),
 	})
-	off := layout.TotalBlobCount(chunkCount) * layout.BlobDiskSize
+	// trailer 紧随全部数据/parity blob 之后；v3 将按 spec.M2Cap 分支计算组跨度。
+	off := w.spec.TotalBlobCount(chunkCount) * layout.BlobDiskSize
 	if _, err := w.dst.Seek(off, io.SeekStart); err != nil {
 		return err
 	}

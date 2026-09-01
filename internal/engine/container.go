@@ -23,6 +23,7 @@ import (
 type Container struct {
 	src      io.ReaderAt
 	Man      format.Manifest
+	spec     layout.Spec
 	aead     crypto.AEAD
 	ManAEAD  crypto.AEAD
 	codecs   *codec.Cache
@@ -79,6 +80,7 @@ func Open(src io.ReaderAt, masterKey []byte) (*Container, error) {
 	return &Container{
 		src:      src,
 		Man:      man,
+		spec:     man.ResolveSpec(),
 		aead:     aead,
 		ManAEAD:  manAEAD,
 		codecs:   codecs,
@@ -120,7 +122,7 @@ func (c *Container) DataChunks(g int64) int64 {
 // GatherBlob 读取整块并逐槽验证 tag。payloads/tags 是同一缓冲的视图。
 func (c *Container) GatherBlob(index int64) (payloads, tags [][]byte, bad []int, err error) {
 	buf := make([]byte, layout.BlobDiskSize)
-	if _, err = c.src.ReadAt(buf, layout.BlobOffset(index)); err != nil && err != io.EOF {
+	if _, err = c.src.ReadAt(buf, c.spec.DataBlobOffset(index)); err != nil && err != io.EOF {
 		return nil, nil, nil, err
 	}
 	payloads = make([][]byte, layout.ShardsPerBlob)
@@ -164,6 +166,7 @@ func (c *Container) RepairIntra(payloads [][]byte, bad []int) ([][]byte, bool) {
 // 返回 组内位置 → 384 个 4KB 载荷。
 func (c *Container) RebuildMissing(g int64, missing []int64) (map[int64][][]byte, bool) {
 	kData := int(c.DataChunks(g))
+	m := int(c.spec.GroupParity(g, c.Man.ChunkCount)) // v2 恒 64
 	mset := make(map[int]bool, len(missing))
 	for _, pos := range missing {
 		if pos < 0 || pos >= int64(kData) {
@@ -171,16 +174,15 @@ func (c *Container) RebuildMissing(g int64, missing []int64) (map[int64][][]byte
 		}
 		mset[int(pos)] = true
 	}
-	if len(mset) == 0 || len(mset) > layout.FileParityShards {
+	if len(mset) == 0 || len(mset) > m {
 		return nil, false
 	}
-	rs, err := c.codecs.File(kData)
+	rs, err := c.codecs.File(kData, m)
 	if err != nil {
 		return nil, false
 	}
 
 	const win = 32
-	raw := make([]byte, win*layout.SlotSize)
 	bufs := make(map[int][]byte, len(mset))
 
 	for j0 := 0; j0 < layout.ShardsPerBlob; j0 += win {
@@ -188,23 +190,8 @@ func (c *Container) RebuildMissing(g int64, missing []int64) (map[int64][][]byte
 		if j0+win > layout.ShardsPerBlob {
 			wc = layout.ShardsPerBlob - j0
 		}
-		shards := make([][]byte, kData+layout.FileParityShards)
+		shards := make([][]byte, kData+m)
 		erasures := 0
-
-		readWindow := func(off int64) ([]byte, bool) {
-			if _, err := c.src.ReadAt(raw[:wc*layout.SlotSize], off); err != nil && err != io.EOF {
-				return nil, false
-			}
-			r := raw[:wc*layout.SlotSize]
-			for cIdx := 0; cIdx < wc; cIdx++ {
-				p := r[cIdx*layout.SlotSize : cIdx*layout.SlotSize+layout.ShardSize]
-				t := r[cIdx*layout.SlotSize+layout.ShardSize : (cIdx+1)*layout.SlotSize]
-				if !crypto.VerifyTag(p, t) {
-					return nil, false
-				}
-			}
-			return codec.ExtractPayloads(r, wc), true
-		}
 
 		for i := 0; i < kData; i++ {
 			if mset[i] {
@@ -212,7 +199,7 @@ func (c *Container) RebuildMissing(g int64, missing []int64) (map[int64][][]byte
 				erasures++
 				continue
 			}
-			p, ok := readWindow(layout.BlobOffset(g*layout.FileGroupChunks+int64(i)) + int64(j0)*layout.SlotSize)
+			p, ok, _ := readWindow(c.src, c.spec.DataBlobOffset(g*layout.FileGroupChunks+int64(i))+int64(j0)*layout.SlotSize, wc)
 			if !ok {
 				shards[i] = nil
 				erasures++
@@ -220,8 +207,8 @@ func (c *Container) RebuildMissing(g int64, missing []int64) (map[int64][][]byte
 			}
 			shards[i] = p
 		}
-		for p := 0; p < layout.FileParityShards; p++ {
-			pb, ok := readWindow(layout.ParityBlobOffset(g, int64(p)) + int64(j0)*layout.SlotSize)
+		for p := 0; p < m; p++ {
+			pb, ok, _ := readWindow(c.src, c.spec.ParityBlobOffset(g, c.DataChunks(g), int64(p))+int64(j0)*layout.SlotSize, wc)
 			if !ok {
 				shards[kData+p] = nil
 				erasures++
@@ -229,7 +216,7 @@ func (c *Container) RebuildMissing(g int64, missing []int64) (map[int64][][]byte
 			}
 			shards[kData+p] = pb
 		}
-		if erasures > layout.FileParityShards {
+		if erasures > m {
 			return nil, false
 		}
 		if err := rs.Reconstruct(shards); err != nil {

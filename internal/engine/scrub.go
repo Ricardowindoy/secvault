@@ -5,7 +5,6 @@ import (
 	"io"
 	"sort"
 
-	"secvault/internal/codec"
 	"secvault/internal/crypto"
 	"secvault/internal/layout"
 )
@@ -63,7 +62,7 @@ func (c *Container) Scrub(w writeAt, rebuildParity bool) (*ScrubStats, error) {
 					slot := make([]byte, layout.SlotSize)
 					copy(slot, payloads[i])
 					copy(slot[layout.ShardSize:], crypto.ShardTag(payloads[i]))
-					if _, err := w.WriteAt(slot, layout.BlobOffset(idx)+int64(i)*layout.SlotSize); err != nil {
+					if _, err := w.WriteAt(slot, c.spec.DataBlobOffset(idx)+int64(i)*layout.SlotSize); err != nil {
 						return nil, err
 					}
 				}
@@ -112,7 +111,7 @@ func (c *Container) Scrub(w writeAt, rebuildParity bool) (*ScrubStats, error) {
 					disk = append(disk, payloads[i]...)
 					disk = append(disk, crypto.ShardTag(payloads[i])...)
 				}
-				if _, err := w.WriteAt(disk, layout.BlobOffset(idx)); err != nil {
+				if _, err := w.WriteAt(disk, c.spec.DataBlobOffset(idx)); err != nil {
 					return nil, err
 				}
 			}
@@ -137,7 +136,6 @@ type writeAt interface {
 func (c *Container) rebuildFileParity(w writeAt, rep *ScrubStats, lostSet map[int64]bool) error {
 	const win = 32
 	raw := make([]byte, win*layout.SlotSize)
-	shards := make([][]byte, 0, layout.FileGroupChunks+layout.FileParityShards)
 
 	for g := int64(0); g < c.Groups; g++ {
 		kData := int(c.DataChunks(g))
@@ -151,7 +149,9 @@ func (c *Container) rebuildFileParity(w writeAt, rep *ScrubStats, lostSet map[in
 		if skip {
 			continue
 		}
-		rs, err := c.codecs.File(kData)
+		m := int(c.spec.GroupParity(g, c.Man.ChunkCount)) // v2 恒 64
+		shards := make([][]byte, 0, layout.FileGroupChunks+m)
+		rs, err := c.codecs.File(kData, m)
 		if err != nil {
 			return err
 		}
@@ -162,28 +162,24 @@ func (c *Container) rebuildFileParity(w writeAt, rep *ScrubStats, lostSet map[in
 			}
 			shards = shards[:0]
 			for i := 0; i < kData; i++ {
-				off := layout.BlobOffset(g*layout.FileGroupChunks+int64(i)) + int64(j0)*layout.SlotSize
-				if _, err := c.src.ReadAt(raw[:wc*layout.SlotSize], off); err != nil && err != io.EOF {
-					return err
+				p, ok, err := readWindow(c.src, c.spec.DataBlobOffset(g*layout.FileGroupChunks+int64(i))+int64(j0)*layout.SlotSize, wc)
+				if err != nil {
+					return err // 读错误显式传播（原语义）
 				}
-				r := raw[:wc*layout.SlotSize]
-				for cIdx := 0; cIdx < wc; cIdx++ {
-					if !crypto.VerifyTag(r[cIdx*layout.SlotSize:cIdx*layout.SlotSize+layout.ShardSize],
-						r[cIdx*layout.SlotSize+layout.ShardSize:(cIdx+1)*layout.SlotSize]) {
-						// pass1 之后数据列不应再坏；保守中止
-						return nil
-					}
+				if !ok {
+					// pass1 之后数据列不应再坏；保守中止
+					return nil
 				}
-				shards = append(shards, codec.ExtractPayloads(r, wc))
+				shards = append(shards, p)
 			}
-			for p := 0; p < layout.FileParityShards; p++ {
+			for p := 0; p < m; p++ {
 				shards = append(shards, make([]byte, wc*layout.ShardSize))
 			}
 			if err := rs.Encode(shards); err != nil {
 				return err
 			}
-			for p := 0; p < layout.FileParityShards; p++ {
-				off := layout.ParityBlobOffset(g, int64(p)) + int64(j0)*layout.SlotSize
+			for p := 0; p < m; p++ {
+				off := c.spec.ParityBlobOffset(g, c.DataChunks(g), int64(p)) + int64(j0)*layout.SlotSize
 				if _, err := c.src.ReadAt(raw[:wc*layout.SlotSize], off); err != nil && err != io.EOF {
 					return err
 				}

@@ -303,43 +303,43 @@ func TestConcurrentReads(t *testing.T) {
 func TestLayoutMath(t *testing.T) {
 	for _, cc := range []int64{0, 1, 2, 127, 128, 129, 130, 255, 256, 257, 384, 385, 1000} {
 		if cc == 0 {
-			if layout.TotalBlobCount(0) != 0 || layout.GroupCount(0) != 0 {
+			if layout.SpecV2().TotalBlobCount(0) != 0 || layout.GroupCount(0) != 0 {
 				t.Fatal("empty file layout")
 			}
 			continue
 		}
 		G := layout.GroupCount(cc)
-		if want := (G-1)*layout.BlobsPerFullGroup + layout.LastGroupChunks(cc) + layout.FileParityShards; layout.TotalBlobCount(cc) != want {
-			t.Fatalf("cc=%d totalBlob=%d want %d", cc, layout.TotalBlobCount(cc), want)
+		if want := (G-1)*layout.BlobsPerFullGroup + layout.LastGroupChunks(cc) + layout.FileParityShards; layout.SpecV2().TotalBlobCount(cc) != want {
+			t.Fatalf("cc=%d totalBlob=%d want %d", cc, layout.SpecV2().TotalBlobCount(cc), want)
 		}
 		// 组 0 parity 从文件 0 开始
-		if got := layout.ParityBlobOffset(0, 0); got != 0 {
+		if got := layout.SpecV2().ParityBlobOffset(0, layout.DataChunksInGroup(0, cc), 0); got != 0 {
 			t.Fatalf("cc=%d group0 parity0=%d", cc, got)
 		}
 		// 首个数据块紧跟组 0 parity 区
-		if got, want := layout.BlobOffset(0), int64(layout.FileParityShards)*layout.BlobDiskSize; got != want {
+		if got, want := layout.SpecV2().DataBlobOffset(0), int64(layout.FileParityShards)*layout.BlobDiskSize; got != want {
 			t.Fatalf("cc=%d blob0=%d want %d", cc, got, want)
 		}
 		// 末组 parity 末尾 == 末组首个数据块（组内连续）
-		if got, want := layout.ParityBlobOffset(G-1, layout.FileParityShards-1)+layout.BlobDiskSize, layout.BlobOffset((G-1)*layout.FileGroupChunks); got != want {
+		if got, want := layout.SpecV2().ParityBlobOffset(G-1, layout.DataChunksInGroup(G-1, cc), layout.FileParityShards-1)+layout.BlobDiskSize, layout.SpecV2().DataBlobOffset((G-1)*layout.FileGroupChunks); got != want {
 			t.Fatalf("cc=%d last parity end %d want %d", cc, got, want)
 		}
 		// 文件数据区末尾 = 总 blob 数末尾
-		if got, want := layout.BlobOffset(cc-1)+layout.BlobDiskSize, layout.TotalBlobCount(cc)*layout.BlobDiskSize; got != want {
+		if got, want := layout.SpecV2().DataBlobOffset(cc-1)+layout.BlobDiskSize, layout.SpecV2().TotalBlobCount(cc)*layout.BlobDiskSize; got != want {
 			t.Fatalf("cc=%d end %d want %d", cc, got, want)
 		}
 		if cc > layout.FileGroupChunks {
-			if got, want := layout.ParityBlobOffset(1, 0), layout.BlobsPerFullGroup*layout.BlobDiskSize; got != want {
+			if got, want := layout.SpecV2().ParityBlobOffset(1, layout.DataChunksInGroup(1, cc), 0), layout.BlobsPerFullGroup*layout.BlobDiskSize; got != want {
 				t.Fatalf("cc=%d group1 parity0=%d want %d", cc, got, want)
 			}
 		}
 		// blobOffset 严格单调
 		prev := int64(-1)
 		for i := int64(0); i < cc; i++ {
-			if layout.BlobOffset(i) <= prev {
+			if layout.SpecV2().DataBlobOffset(i) <= prev {
 				t.Fatalf("cc=%d blobOffset not monotonic at %d", cc, i)
 			}
-			prev = layout.BlobOffset(i)
+			prev = layout.SpecV2().DataBlobOffset(i)
 		}
 	}
 }

@@ -156,10 +156,10 @@ func TestScrubFileLevelRebuild(t *testing.T) {
 func TestScrubParityRebuild(t *testing.T) {
 	plain := testutil.MakePlain(3*layout.ChunkPlainSize+40, 35)
 	mf := testutil.WriteVault(t, plain)
-	_ = 0
 	// 破坏组 0 parity blob 0 的 8 个槽
+	cc := int64((len(plain) + layout.ChunkPlainSize - 1) / layout.ChunkPlainSize)
 	for i := 0; i < 8; i++ {
-		testutil.FlipByte(t, mf, layout.ParityBlobOffset(0, 0)+int64(i)*layout.SlotSize+int64(100+i))
+		testutil.FlipByte(t, mf, layout.SpecV2().ParityBlobOffset(0, layout.DataChunksInGroup(0, cc), 0)+int64(i)*layout.SlotSize+int64(100+i))
 	}
 
 	// 不开 RebuildParity：不检测、不改 parity，数据读取不受影响

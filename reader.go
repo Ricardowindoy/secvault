@@ -7,7 +7,6 @@ import (
 	"sync"
 
 	"secvault/internal/engine"
-	ierrors "secvault/internal/errors"
 )
 
 // Reader 打开并读取 secvault 容器，实现 io.ReaderAt 语义（明文视图）。
@@ -115,5 +114,3 @@ func cloneInto(buf, src []byte) []byte {
 	}
 	return append(buf[:0], src...)
 }
-
-var _ = ierrors.New

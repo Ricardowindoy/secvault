@@ -5,7 +5,6 @@ import (
 	"io"
 
 	"secvault/internal/engine"
-	ierrors "secvault/internal/errors"
 )
 
 // Options scrub 选项。
@@ -84,5 +83,3 @@ type ChunkError struct {
 
 func (e *ChunkError) Error() string { return fmt.Sprintf("secvault: chunk %d: %v", e.Index, e.Err) }
 func (e *ChunkError) Unwrap() error { return e.Err }
-
-var _ = ierrors.New

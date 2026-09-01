@@ -156,7 +156,7 @@ var (
 // regionOf 判断偏移所属区域（数据 blob / parity blob / trailer）。
 func regionOf(off int64) string {
 	for i := int64(0); i < chunkCount; i++ {
-		b := layout.BlobOffset(i)
+		b := layout.SpecV2().DataBlobOffset(i)
 		if off >= b && off < b+layout.BlobDiskSize {
 			slot := (off - b) / layout.SlotSize
 			inner := (off - b) % layout.SlotSize
@@ -172,8 +172,8 @@ func regionOf(off int64) string {
 	}
 	g := layout.GroupCount(chunkCount)
 	for gg := int64(0); gg < g; gg++ {
-		for p := int64(0); p < layout.FileParityShards; p++ {
-			b := layout.ParityBlobOffset(gg, p)
+		for p := int64(0); p < layout.SpecV2().GroupParity(gg, chunkCount); p++ {
+			b := layout.SpecV2().ParityBlobOffset(gg, layout.DataChunksInGroup(gg, chunkCount), p)
 			if off >= b && off < b+layout.BlobDiskSize {
 				slot := (off - b) / layout.SlotSize
 				inner := (off - b) % layout.SlotSize
@@ -202,12 +202,12 @@ func xorByteAt(m *memFile, off int64) {
 }
 
 func corruptSlotPayload(m *memFile, chunk, slot int64) {
-	off := layout.BlobOffset(chunk) + slot*layout.SlotSize + int64(rand.Intn(layout.ShardSize))
+	off := layout.SpecV2().DataBlobOffset(chunk) + slot*layout.SlotSize + int64(rand.Intn(layout.ShardSize))
 	xorByteAt(m, off)
 }
 
 func zeroBlob(m *memFile, chunk int64) {
-	b := layout.BlobOffset(chunk)
+	b := layout.SpecV2().DataBlobOffset(chunk)
 	batchLogs = append(batchLogs, batchChange{
 		desc:   fmt.Sprintf("整块清零 chunk#%d", chunk),
 		from:   b,
@@ -420,17 +420,17 @@ func main() {
 	// 3. 破坏测试序列
 	events := []event{
 		{"单bit翻转（数据区）", "可自愈", func(m *memFile) {
-			flipBitAt(m, layout.BlobOffset(0)+int64(int(layout.BlobDiskSize)))
+			flipBitAt(m, layout.SpecV2().DataBlobOffset(0)+int64(int(layout.BlobDiskSize)))
 		}},
 		{"单bit翻转（文件级parity区）", "可自愈", func(m *memFile) {
-			flipBitAt(m, layout.ParityBlobOffset(0, int64(rand.Intn(64)))+int64(rand.Intn(int(layout.BlobDiskSize))))
+			flipBitAt(m, layout.SpecV2().ParityBlobOffset(0, layout.DataChunksInGroup(0, chunkCount), int64(rand.Intn(64)))+int64(rand.Intn(int(layout.BlobDiskSize))))
 		}},
 		{"tag区单字节翻转", "可自愈", func(m *memFile) {
-			off := layout.BlobOffset(0) + int64(rand.Intn(int(layout.ShardsPerBlob)))*layout.SlotSize + layout.ShardSize
+			off := layout.SpecV2().DataBlobOffset(0) + int64(rand.Intn(int(layout.ShardsPerBlob)))*layout.SlotSize + layout.ShardSize
 			xorByteAt(m, off)
 		}},
 		{"chunk header 区单字节（槽0载荷）", "可自愈", func(m *memFile) {
-			xorByteAt(m, layout.BlobOffset(0)+int64(rand.Intn(32)))
+			xorByteAt(m, layout.SpecV2().DataBlobOffset(0)+int64(rand.Intn(32)))
 		}},
 		{"10字节随机分散翻转", "可自愈", func(m *memFile) {
 			for i := 0; i < 10; i++ {
@@ -438,7 +438,7 @@ func main() {
 			}
 		}},
 		{"100字节集中破坏1个shard", "可自愈", func(m *memFile) {
-			base := layout.BlobOffset(0) + int64(rand.Intn(int(layout.DataShards)))*layout.SlotSize
+			base := layout.SpecV2().DataBlobOffset(0) + int64(rand.Intn(int(layout.DataShards)))*layout.SlotSize
 			for i := 0; i < 100; i++ {
 				xorByteAt(m, base+int64(rand.Intn(layout.ShardSize)))
 			}

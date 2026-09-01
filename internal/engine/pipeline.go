@@ -21,6 +21,7 @@ type Pipeline struct {
 	dst   io.ReadWriteSeeker
 	aead  crypto.AEAD
 	codec *codec.Cache
+	spec  layout.Spec
 
 	noncePfx [4]byte
 	workers  int
@@ -75,7 +76,7 @@ type parityMsg struct {
 // NewPipeline 装配流水线（启动全部 goroutine）。
 // 调用方负责在结束时调用 Close 流程（FlushLast → Drain）。
 func NewPipeline(dst io.ReadWriteSeeker, aead crypto.AEAD, cd *codec.Cache,
-	noncePfx [4]byte, workers, inflight int) *Pipeline {
+	noncePfx [4]byte, workers, inflight int, spec layout.Spec) *Pipeline {
 	p := &Pipeline{
 		dst:      dst,
 		aead:     aead,
@@ -89,6 +90,7 @@ func NewPipeline(dst io.ReadWriteSeeker, aead crypto.AEAD, cd *codec.Cache,
 		parDone:  make(chan struct{}),
 		slotBuf:  make([]byte, 0, 32*layout.SlotSize),
 	}
+	p.spec = spec
 	p.plainPool.New = func() any { return make([]byte, layout.ChunkPlainSize) }
 	p.blobPool.New = func() any { return make([]byte, layout.BlobPlainSize) }
 	p.parPool.New = func() any { return make([]byte, layout.ParityShards*layout.ShardSize) }
@@ -233,7 +235,7 @@ func (p *Pipeline) writeLoop() {
 			}
 			delete(pending, next)
 			if !j.failed {
-				if err := p.seekWrite(layout.BlobOffset(j.idx), j.disk); err != nil {
+				if err := p.seekWrite(p.spec.DataBlobOffset(j.idx), j.disk); err != nil {
 					p.errStore(err)
 				} else {
 					p.plainSize += int64(j.plainLen)
@@ -283,16 +285,17 @@ func (p *Pipeline) parityLoop() {
 	}
 }
 
-// writeParityGroup：文件级 RS(kData,64)，窗口直切 blob/par 视图（零拷贝）。
+// writeParityGroup：文件级 RS(kData, m)（v2 m=64），窗口直切 blob/par 视图（零拷贝）。
 // 窗口 0-7 落在 blob（256 数据列），窗口 8-11 落在 par（128 校验列），均连续。
 func (p *Pipeline) writeParityGroup(g int64, kData int, blobs, pars [][]byte) error {
-	rs, err := p.codec.File(kData)
+	m := int(p.spec.M2Cap) // v2=64；v3 将按 kData 取 min(M2Cap,kData)
+	rs, err := p.codec.File(kData, m)
 	if err != nil {
 		return err
 	}
 	const win = 32
-	shards := make([][]byte, kData+layout.FileParityShards)
-	parOut := make([][]byte, layout.FileParityShards)
+	shards := make([][]byte, kData+m)
+	parOut := make([][]byte, m)
 	for j0 := 0; j0 < layout.ShardsPerBlob; j0 += win {
 		wc := win
 		if j0+win > layout.ShardsPerBlob {
@@ -312,14 +315,14 @@ func (p *Pipeline) writeParityGroup(g int64, kData int, blobs, pars [][]byte) er
 		if err := rs.Encode(shards); err != nil {
 			return fmt.Errorf("secvault: file-level encode: %w", err)
 		}
-		for q := 0; q < layout.FileParityShards; q++ {
+		for q := 0; q < m; q++ {
 			p.slotBuf = p.slotBuf[:0]
 			for c := 0; c < wc; c++ {
 				col := parOut[q][c*layout.ShardSize : (c+1)*layout.ShardSize]
 				p.slotBuf = append(p.slotBuf, col...)
 				p.slotBuf = append(p.slotBuf, crypto.ShardTag(col)...)
 			}
-			off := layout.ParityBlobOffset(g, int64(q)) + int64(j0)*layout.SlotSize
+			off := p.spec.ParityBlobOffset(g, int64(kData), int64(q)) + int64(j0)*layout.SlotSize
 			if err := p.seekWrite(off, p.slotBuf); err != nil {
 				return err
 			}

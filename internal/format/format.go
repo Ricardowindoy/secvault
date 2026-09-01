@@ -67,7 +67,13 @@ type Manifest struct {
 	PlainSize  int64 `json:"ps"`
 }
 
-// Validate 校验 manifest 参数与文件尺寸一致性（尺寸不符即截断/追加）。
+// ResolveSpec 从 manifest 解析布局参数。当前恒为 v2（v3 落地后按 m.Version 分支）。
+func (m *Manifest) ResolveSpec() layout.Spec {
+	return layout.SpecV2()
+}
+
+// Validate 校验 manifest 参数与文件尺寸一致性（尺寸不符即截断/追加）；
+// 尺寸期望由 ResolveSpec 解析出的布局参数计算（组数、末组块数等随版本集中到 layout.Spec）。
 func (m *Manifest) Validate(size, trailerLen int64) error {
 	if m.Version != FormatVersion ||
 		m.K != layout.DataShards || m.M != layout.ParityShards ||
@@ -87,7 +93,7 @@ func (m *Manifest) Validate(size, trailerLen int64) error {
 			return errors.ErrUnsupportedFormat
 		}
 	}
-	if expect := layout.TotalBlobCount(m.ChunkCount)*layout.BlobDiskSize + trailerLen; expect != size {
+	if expect := m.ResolveSpec().TotalBlobCount(m.ChunkCount)*layout.BlobDiskSize + trailerLen; expect != size {
 		return errors.ErrNoManifest // 尺寸对不上：截断或追加
 	}
 	return nil

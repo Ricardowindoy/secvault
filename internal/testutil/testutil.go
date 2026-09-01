@@ -292,7 +292,7 @@ func CorruptSlot(t *testing.T, f RwFile, chunk, slot int64, inner int) {
 	if inner < 0 || inner >= layout.ShardSize {
 		t.Fatalf("inner %d out of payload range", inner)
 	}
-	FlipByte(t, f, layout.BlobOffset(chunk)+slot*layout.SlotSize+int64(inner))
+	FlipByte(t, f, layout.SpecV2().DataBlobOffset(chunk)+slot*layout.SlotSize+int64(inner))
 }
 
 // corruptTag 翻转 (chunk, slot) 槽的 tag 区字节。
@@ -301,13 +301,13 @@ func CorruptTag(t *testing.T, f RwFile, chunk, slot int64, inner int) {
 	if inner < 0 || inner >= layout.TagSize {
 		t.Fatalf("inner %d out of tag range", inner)
 	}
-	FlipByte(t, f, layout.BlobOffset(chunk)+slot*layout.SlotSize+layout.ShardSize+int64(inner))
+	FlipByte(t, f, layout.SpecV2().DataBlobOffset(chunk)+slot*layout.SlotSize+layout.ShardSize+int64(inner))
 }
 
 // zeroBlob 整块清零（模拟整块彻底损坏）。
 func ZeroBlob(t *testing.T, f RwFile, chunk int64) {
 	buf := make([]byte, layout.BlobDiskSize)
-	if _, err := f.WriteAt(buf, layout.BlobOffset(chunk)); err != nil {
+	if _, err := f.WriteAt(buf, layout.SpecV2().DataBlobOffset(chunk)); err != nil {
 		t.Fatal(err)
 	}
 }
