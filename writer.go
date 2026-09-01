@@ -19,6 +19,8 @@ type WriterOption func(*writerOpts)
 type writerOpts struct {
 	workers  int
 	inflight int
+	m2cap    int
+	formatV3 bool
 }
 
 // WithWorkers 编码 worker 数（默认 4）。
@@ -39,7 +41,21 @@ func WithInflight(n int) WriterOption {
 	}
 }
 
-// Writer 流式写入加密容器（v2 无屏障流水线，详见 FORMAT.md 写入语义）。
+// WithFileParity 设置文件级 parity 上限（1..FileParityShards），并启用 v3 格式
+// （data-first 组布局 + 自适应末组 parity：末组 parity = min(m2cap, kData)）。
+// 缺省写 v2 格式（M2 恒 64，末组也 64）。m2cap=64 时 v3 满组与 v2 等价，
+// 仅末组按 1:1 上限收紧——这是 v3.0 自适应 parity 的默认形态。
+func WithFileParity(m int) WriterOption {
+	return func(o *writerOpts) {
+		if m >= 1 && m <= layout.FileParityShards {
+			o.m2cap = m
+			o.formatV3 = true
+		}
+	}
+}
+
+// Writer 流式写入加密容器（缺省 v2 无屏障流水线；WithFileParity 显式启用 v3
+// 自适应 parity，详见 FORMAT.md / FORMAT-v3.md 写入语义）。
 // Write 允许异步：返回时块可能尚未落盘，错误延后至后续 Write/Close 冒泡；
 // Close 必须调用（排空流水线 + 写 trailer）。非并发安全（单 goroutine 调用）。
 // dst 需要可读可写可寻址（*os.File 满足）；必须从空文件/偏移 0 开始。
@@ -49,6 +65,8 @@ type Writer struct {
 	manAEAD  crypto.AEAD
 	fileID   []byte
 	spec     layout.Spec
+	version  int
+	m2cap    int
 	closed   bool
 }
 
@@ -60,7 +78,7 @@ func NewWriter(dst io.ReadWriteSeeker, masterKey []byte, opts ...WriterOption) (
 	if dst == nil {
 		return nil, ierrors.New("secvault: nil destination")
 	}
-	o := writerOpts{workers: 4, inflight: 16}
+	o := writerOpts{workers: 4, inflight: 16, m2cap: layout.FileParityShards}
 	for _, f := range opts {
 		f(&o)
 	}
@@ -86,13 +104,20 @@ func NewWriter(dst io.ReadWriteSeeker, masterKey []byte, opts ...WriterOption) (
 	}
 	var noncePfx [4]byte
 	copy(noncePfx[:], pfx)
+	version := format.FormatVersion
 	spec := layout.SpecV2()
+	if o.formatV3 {
+		version = format.FormatVersionV3
+		spec = layout.SpecV3(int64(o.m2cap))
+	}
 	return &Writer{
 		dst:      dst,
 		pipeline: engine.NewPipeline(dst, aead, codecs, noncePfx, o.workers, o.inflight, spec),
 		manAEAD:  manAEAD,
 		fileID:   fileID,
 		spec:     spec,
+		version:  version,
+		m2cap:    o.m2cap,
 	}, nil
 }
 
@@ -115,11 +140,11 @@ func (w *Writer) Close() error {
 		return err
 	}
 	man := format.Manifest{
-		Version:    format.FormatVersion,
+		Version:    w.version,
 		K:          layout.DataShards,
 		M:          layout.ParityShards,
 		K2:         layout.FileGroupChunks,
-		M2:         layout.FileParityShards,
+		M2:         w.m2cap,
 		ShardSize:  layout.ShardSize,
 		ChunkPlain: layout.ChunkPlainSize,
 		ChunkCount: chunkCount,
@@ -134,12 +159,12 @@ func (w *Writer) Close() error {
 		return err
 	}
 	tr := format.BuildTrailer(&format.Trailer{
-		Version: format.FormatVersion,
+		Version: w.version,
 		FileID:  w.fileID,
 		Nonce:   nonce,
 		Payload: w.manAEAD.Seal(nil, nonce, mb, nil),
 	})
-	// trailer 紧随全部数据/parity blob 之后；v3 将按 spec.M2Cap 分支计算组跨度。
+	// trailer 紧随全部数据/parity blob 之后；组跨度/末组 parity 随 spec（v2/v3）自适应。
 	off := w.spec.TotalBlobCount(chunkCount) * layout.BlobDiskSize
 	if _, err := w.dst.Seek(off, io.SeekStart); err != nil {
 		return err

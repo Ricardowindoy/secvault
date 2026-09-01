@@ -78,13 +78,19 @@ func (s Spec) groupSpan() int64 {
 	return BlobsPerFullGroup
 }
 
-// GroupParity 组 g 的 parity blob 数。
-// v2 恒 FileParityShards(64)（含末组）；v3 = min(M2Cap, DataChunksInGroup(g, chunkCount))。
-func (s Spec) GroupParity(g, chunkCount int64) int64 {
+// ParityCountFor 给定组内数据块数 kData 时该组的 parity blob 数。
+// v2 恒 FileParityShards(64)（末组也写 64 个，与磁盘格式一致）；
+// v3 = min(M2Cap, kData)：满组（kData=128）即 M2Cap，末组按 1:1 上限收紧。
+func (s Spec) ParityCountFor(kData int64) int64 {
 	if s.Version >= 3 {
-		return min(s.M2Cap, DataChunksInGroup(g, chunkCount))
+		return min(s.M2Cap, kData)
 	}
 	return FileParityShards
+}
+
+// GroupParity 组 g 的 parity blob 数（委托 ParityCountFor 按组内数据块数计算）。
+func (s Spec) GroupParity(g, chunkCount int64) int64 {
+	return s.ParityCountFor(DataChunksInGroup(g, chunkCount))
 }
 
 // DataBlobOffset 数据 blob i 的文件偏移。

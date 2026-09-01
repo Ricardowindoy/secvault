@@ -15,6 +15,10 @@ import (
 // FormatVersion 当前格式版本。
 const FormatVersion = 2
 
+// FormatVersionV3 v3 格式版本（v3：data-first 组布局 + 自适应文件级 parity）。
+// FormatVersion 保持 2 作为缺省写出版本（v3 由 WithFileParity 显式启用）。
+const FormatVersionV3 = 3
+
 const (
 	magicTrailer = "SVLT"
 	magicChunk   = "SVC1"
@@ -67,19 +71,29 @@ type Manifest struct {
 	PlainSize  int64 `json:"ps"`
 }
 
-// ResolveSpec 从 manifest 解析布局参数。当前恒为 v2（v3 落地后按 m.Version 分支）。
+// ResolveSpec 从 manifest 解析布局参数：v2 → SpecV2（parity-first、恒 64 parity）；
+// v3 → SpecV3(m.Version>=3 时 M2 字段即 M2Cap)。
 func (m *Manifest) ResolveSpec() layout.Spec {
+	if m.Version >= FormatVersionV3 {
+		return layout.SpecV3(int64(m.M2))
+	}
 	return layout.SpecV2()
 }
 
 // Validate 校验 manifest 参数与文件尺寸一致性（尺寸不符即截断/追加）；
 // 尺寸期望由 ResolveSpec 解析出的布局参数计算（组数、末组块数等随版本集中到 layout.Spec）。
 func (m *Manifest) Validate(size, trailerLen int64) error {
-	if m.Version != FormatVersion ||
+	if m.Version != FormatVersion && m.Version != FormatVersionV3 ||
 		m.K != layout.DataShards || m.M != layout.ParityShards ||
-		m.K2 != layout.FileGroupChunks || m.M2 != layout.FileParityShards ||
+		m.K2 != layout.FileGroupChunks ||
 		m.ShardSize != layout.ShardSize || m.ChunkPlain != layout.ChunkPlainSize {
 		return errors.ErrUnsupportedFormat
+	}
+	// M2 版本感知：v2 恒为 FileParityShards(64)；v3 为文件级 parity 上限，可取 [1, 64]。
+	if m.M2 != layout.FileParityShards {
+		if m.Version != FormatVersionV3 || m.M2 < 1 || m.M2 > layout.FileParityShards {
+			return errors.ErrUnsupportedFormat
+		}
 	}
 	if m.ChunkCount < 0 || m.PlainSize < 0 {
 		return errors.ErrUnsupportedFormat
@@ -142,8 +156,9 @@ func ParseTrailer(tail []byte) (*Trailer, error) {
 		if crc32.Checksum(body, crc32cTable) != binary.BigEndian.Uint32(tail[end-4:]) {
 			continue
 		}
-		if tail[i+4] != FormatVersion {
-			return nil, fmt.Errorf("secvault: format version %d unsupported", tail[i+4])
+		v := int(tail[i+4])
+		if v != FormatVersion && v != FormatVersionV3 {
+			return nil, fmt.Errorf("secvault: format version %d unsupported", v)
 		}
 		return &Trailer{
 			Version: int(tail[i+4]),

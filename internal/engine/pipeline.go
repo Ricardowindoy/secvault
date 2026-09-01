@@ -285,10 +285,11 @@ func (p *Pipeline) parityLoop() {
 	}
 }
 
-// writeParityGroup：文件级 RS(kData, m)（v2 m=64），窗口直切 blob/par 视图（零拷贝）。
-// 窗口 0-7 落在 blob（256 数据列），窗口 8-11 落在 par（128 校验列），均连续。
+// writeParityGroup：文件级 RS(kData, m)，m 经 spec.ParityCountFor 得出——v2 恒 64（末组也
+// 64）；v3 满组=M2Cap、末组=min(M2Cap,kLast)，1:1 上限由 Spec 统一保证。窗口直切 blob/par
+// 视图（零拷贝）。窗口 0-7 落在 blob（256 数据列），窗口 8-11 落在 par（128 校验列），均连续。
 func (p *Pipeline) writeParityGroup(g int64, kData int, blobs, pars [][]byte) error {
-	m := int(p.spec.M2Cap) // v2=64；v3 将按 kData 取 min(M2Cap,kData)
+	m := int(p.spec.ParityCountFor(int64(kData))) // v2 恒 64（末组也 64）；v3 满组=M2Cap、末组=min(M2Cap,kLast)
 	rs, err := p.codec.File(kData, m)
 	if err != nil {
 		return err
