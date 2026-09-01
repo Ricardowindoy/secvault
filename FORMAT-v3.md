@@ -1,9 +1,11 @@
 # secvault 格式规范 v3（设计定稿）
 
-> 本文档是 **v3 设计提案**，尚未实现。现行格式见 `FORMAT.md`（v2）。
+> **实现状态**：v3.0（rs-dual 自适应文件级 parity，`WithFileParity(m)` + data-first 布局）**已实现**（commit 05c642b）；
+> gcm-only / rs-strong 两 scheme 尚未实现。现行 v2 见 `FORMAT.md`。
 > v3 按**内容类别**分三种容器 scheme：`gcm-only` / `rs-strong` / `rs-dual`。
 > 设计过程：从 v2 小文件浪费出发，历经"自适应 parity（v3.0）→ 变长末块（v3.1）→ mirror"多轮方案，
 > 最终按用户确认的 p91 场景定稿为三类别方案（v3.1 变长末块与 mirror 均被否决，理由见 §3.4 / §8）。
+> **实现说明**：v3.0 当前为 opt-in（默认仍写 v2），p91 接入阶段再翻默认。
 
 ## 1. 目标与不变量
 
