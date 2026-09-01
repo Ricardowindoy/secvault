@@ -33,6 +33,62 @@ const (
 	MasterKeySize = 32
 )
 
+// v3 批次1 新增布局常量（gcm-only 与 rs-strong 两 scheme；rs-dual 沿用上方 v2 参数）。
+const (
+	// gcm-only 布局：[4B magic "SVGO"][12B nonce][GCM密文+tag (plainSize+16)B]
+	magicGCMOnly  = "SVGO"
+	GCMHeaderSize = 4 + NonceSize // = 16（magic + nonce）
+
+	// rs-strong 布局参数（FORMAT-v3.md §5.1，固定）：
+	// 正文 = 96 槽，每槽 [shardSize B 载荷][16B tag]。
+	KStrong     = 32            // 数据 shard
+	MStrong     = 64            // 校验 shard（M = 2K）
+	StrongSlots = KStrong + MStrong // = 96 槽
+)
+
+// MagicGCMOnly 返回 gcm-only 正文头 magic（"SVGO"）。
+// gcm-only 不复用 32B chunkHeader（SVC1），用自己的 16B 头，故 magic 独立。
+func MagicGCMOnly() []byte { return []byte(magicGCMOnly) }
+
+// ---- gcm-only 尺寸（纯函数，零依赖）----
+
+// GCMOnlyPayloadSize gcm-only 正文载荷 = 头(16) + plainSize + GCM tag(16)。
+// 这也是 trailer 的起始偏移。
+func GCMOnlyPayloadSize(plainSize int64) int64 {
+	return int64(GCMHeaderSize) + plainSize + int64(TagSize)
+}
+
+// GCMOnlySize gcm-only 容器总大小 = 载荷 + trailer。
+func GCMOnlySize(plainSize, trailerLen int64) int64 {
+	return GCMOnlyPayloadSize(plainSize) + trailerLen
+}
+
+// ---- rs-strong 尺寸（纯函数，零依赖；批次2 使用，本批先就位）----
+
+// StrongShardSize rs-strong 单 shard 载荷 = ceil((HeaderSize + plainSize + TagSize) / KStrong)。
+// RS 数据区 = chunkHeader(32) || GCM密文+tag(plainSize+16) || 零填充，
+// 总长向上取整到 KStrong 倍数。
+func StrongShardSize(plainSize int64) int64 {
+	dataLen := int64(HeaderSize) + plainSize + int64(TagSize) // 32 + plainSize + 16
+	return (dataLen + KStrong - 1) / KStrong
+}
+
+// StrongSlotSize rs-strong 单槽落盘 = shardSize + TagSize(16)。
+func StrongSlotSize(plainSize int64) int64 {
+	return StrongShardSize(plainSize) + int64(TagSize)
+}
+
+// StrongPayloadSize rs-strong 正文落盘 = 96 × (shardSize + Tag)。
+// 这也是 trailer 的起始偏移。
+func StrongPayloadSize(plainSize int64) int64 {
+	return int64(StrongSlots) * StrongSlotSize(plainSize)
+}
+
+// StrongSize rs-strong 容器总大小 = 正文 + trailer。
+func StrongSize(plainSize, trailerLen int64) int64 {
+	return StrongPayloadSize(plainSize) + trailerLen
+}
+
 // GroupCount 组数 = ceil(C/128)。
 func GroupCount(chunkCount int64) int64 {
 	if chunkCount == 0 {

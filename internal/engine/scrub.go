@@ -5,6 +5,7 @@ import (
 	"io"
 	"sort"
 
+	ierrors "secvault/internal/errors"
 	"secvault/internal/crypto"
 	"secvault/internal/layout"
 )
@@ -123,6 +124,68 @@ func (c *Container) Scrub(w writeAt, rebuildParity bool) (*ScrubStats, error) {
 		if err := c.rebuildFileParity(w, rep, lostSet); err != nil {
 			return nil, err
 		}
+	}
+	return rep, nil
+}
+
+// ScrubGCMOnly gcm-only 容器巡检：整文件 = 1 个"块"（复用 ChunksTotal/Lost 语义）。
+// GCM.Open 失败 → 损坏标记（ChunksLost=[0]）；本类别无冗余可修，不回写——
+// Scrub 与 Verify 语义相同，损坏交调用方重拉。I/O 错误显式传播。
+func (c *Container) ScrubGCMOnly() (*ScrubStats, error) {
+	rep := &ScrubStats{ChunksTotal: 1}
+	if _, err := c.LoadGCMOnly(); err != nil {
+		if ierrors.Is(err, ierrors.ErrGCMOnlyCorrupted) {
+			rep.ChunksLost = append(rep.ChunksLost, 0)
+			return rep, nil
+		}
+		return nil, err
+	}
+	rep.ChunksClean = 1
+	return rep, nil
+}
+
+// ScrubStrong rs-strong 容器巡检（DESIGN-v3-phase2 §2.9/§3.5）：逐槽 tag 验证 →
+// 坏槽 RS(32,64) 重建 → GCM 终审 → 回写坏槽（载荷 + 重算 tag）。w 为 nil 时纯只读
+// 校验（*Repaired 表示"可修复"），与 rs-dual 的 Verify/Scrub 语义一致。
+// 重建后 GCM 终审失败（tag 一致但内容损坏，RS 只保证数学一致）→ ChunksLost=[0]；
+// 坏槽 >64（超出 RS(32,64) 容错边界）→ 同样 ChunksLost=[0]，不回写。
+// RebuildParity 对 rs-strong 无意义（单 blob 无文件级 parity），忽略。
+func (c *Container) ScrubStrong(w writeAt) (*ScrubStats, error) {
+	rep := &ScrubStats{ChunksTotal: 1}
+	shards, bad, shardSize, err := c.gatherStrongSlots()
+	if err != nil {
+		return nil, err
+	}
+	rep.ShardsBad = int64(len(bad))
+	fixed := shards
+	if len(bad) > 0 {
+		rebuilt, ok := c.reconstructStrong(shards, bad)
+		if !ok {
+			rep.ChunksLost = append(rep.ChunksLost, 0)
+			return rep, nil
+		}
+		fixed = rebuilt
+	}
+	if _, derr := c.decodeStrongArea(fixed, shardSize); derr != nil {
+		rep.ChunksLost = append(rep.ChunksLost, 0)
+		return rep, nil
+	}
+	if len(bad) > 0 {
+		rep.ChunksRepaired = 1
+		rep.ShardsRepaired = int64(len(bad))
+		if w != nil {
+			slotSize := shardSize + int64(layout.TagSize)
+			for _, i := range bad {
+				slot := make([]byte, slotSize)
+				copy(slot, fixed[i])
+				copy(slot[shardSize:], crypto.ShardTag(fixed[i]))
+				if _, err := w.WriteAt(slot, int64(i)*slotSize); err != nil {
+					return nil, err
+				}
+			}
+		}
+	} else {
+		rep.ChunksClean = 1
 	}
 	return rep, nil
 }

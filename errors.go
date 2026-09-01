@@ -16,6 +16,9 @@ var (
 	ErrUnsupportedFormat = ierrors.ErrUnsupportedFormat
 	// ErrChunkUnrecoverable 块损坏超出全部纠错能力（块内 RS + 文件级 RS 均失败）。
 	ErrChunkUnrecoverable = ierrors.ErrChunkUnrecoverable
+	// ErrGCMOnlyCorrupted gcm-only 容器损坏（GCM.Open 失败）：检测到损坏/篡改，
+	// 本类别无修复路径，调用方应从源站重拉。
+	ErrGCMOnlyCorrupted = ierrors.ErrGCMOnlyCorrupted
 	// ErrClosed 写入器已关闭。
 	ErrClosed = ierrors.New("secvault: writer already closed")
 	// ErrNegativeOffset 负偏移。

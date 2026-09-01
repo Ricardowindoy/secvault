@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"secvault/internal/engine"
+	"secvault/internal/format"
 )
 
 // Options scrub 选项。
@@ -33,32 +34,49 @@ type readWriteAt interface {
 	io.WriterAt
 }
 
-// Verify 只读深度校验：逐 shard tag + 块内可修复性 + 文件级可重建性 + GCM 终审。
+// Verify 只读深度校验：按 scheme 分派——rs-dual 逐 shard tag + 块内可修复性 +
+// 文件级可重建性 + GCM 终审；gcm-only 整文件 GCM.Open 检测（无修复路径）；
+// rs-strong 逐槽 tag + RS(32,64) 可重建性 + GCM 终审（整文件 = 1 个"块"）。
 // 不修改文件。
 func Verify(src io.ReaderAt, masterKey []byte, opts Options) (*Report, error) {
 	c, err := engine.Open(src, masterKey)
 	if err != nil {
 		return nil, err
 	}
-	st, err := c.Scrub(nil, opts.RebuildParity)
+	st, err := scrubStats(c, nil, opts)
 	if err != nil {
 		return nil, err
 	}
 	return toReport(st), nil
 }
 
-// Scrub 深度校验并就地修复：块内修复回写坏槽，块内救不活的整块走文件级
-// 重建并整体回写，可选重算文件级 parity。修复来源是纠错冗余本身。
+// Scrub 深度校验并就地修复：按 scheme 分派——rs-dual 块内修复回写坏槽，块内
+// 救不活的整块走文件级重建并整体回写，可选重算文件级 parity（修复来源是纠错冗余
+// 本身）；gcm-only 无冗余可修，仅报告损坏（语义同 Verify）；rs-strong 逐槽 tag
+// 修复：坏槽 RS(32,64) 重建后回写载荷+tag（RebuildParity 对单 blob 无意义，忽略）。
 func Scrub(rw readWriteAt, masterKey []byte, opts Options) (*Report, error) {
 	c, err := engine.Open(rw, masterKey)
 	if err != nil {
 		return nil, err
 	}
-	st, err := c.Scrub(rw, opts.RebuildParity)
+	st, err := scrubStats(c, rw, opts)
 	if err != nil {
 		return nil, err
 	}
 	return toReport(st), nil
+}
+
+// scrubStats 按容器 scheme 分派巡检（w=nil 为 Verify 只读语义）。
+// rs-strong 的 RebuildParity 被忽略：单 blob 无文件级 parity 可重算。
+func scrubStats(c *engine.Container, w io.WriterAt, opts Options) (*engine.ScrubStats, error) {
+	switch c.Scheme() {
+	case format.SchemeGCMOnly:
+		return c.ScrubGCMOnly()
+	case format.SchemeRSStrong:
+		return c.ScrubStrong(w)
+	default: // rs-dual（含 v2）
+		return c.Scrub(w, opts.RebuildParity)
+	}
 }
 
 func toReport(st *engine.ScrubStats) *Report {

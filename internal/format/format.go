@@ -59,6 +59,8 @@ func ParseChunkHeader(b []byte) (*ChunkHeader, error) {
 }
 
 // Manifest 尾部加密清单。K2 记录名义组大小（128），实际末组 kData 由 ChunkCount 推导。
+// v3 起 Manifest 增加 scheme 维度：字段语义按 scheme 分化（见 ResolveScheme/Validate），
+// gcm-only/rs-strong 无"块/组"概念，rs-dual 专有字段（k/m/k2/m2/ss/cp/cc）保持零值。
 type Manifest struct {
 	Version    int   `json:"v"`
 	K          int   `json:"k"`
@@ -69,10 +71,35 @@ type Manifest struct {
 	ChunkPlain int   `json:"cp"`
 	ChunkCount int64 `json:"cc"`
 	PlainSize  int64 `json:"ps"`
+	// Scheme v3 scheme（"gcm" | "rs-strong" | "rs-dual"）。
+	// 空值=rs-dual（v2/旧 v3 文件无此字段，向后兼容）。
+	Scheme string `json:"sc,omitempty"`
+	// KStrong/MStrong rs-strong 冗余记录（=32/64，固定可推导，记录以支持前向校验）。
+	KStrong int `json:"ks,omitempty"`
+	MStrong int `json:"ms,omitempty"`
+}
+
+// Scheme 容器 scheme（三类别，FORMAT-v3.md §3）。
+type Scheme string
+
+const (
+	SchemeRSDual   Scheme = "rs-dual"
+	SchemeGCMOnly  Scheme = "gcm"
+	SchemeRSStrong Scheme = "rs-strong"
+)
+
+// ResolveScheme 从 manifest 解析 scheme：空/缺失 → rs-dual（v2 与旧 v3 兼容）。
+func (m *Manifest) ResolveScheme() Scheme {
+	if m.Scheme == "" {
+		return SchemeRSDual
+	}
+	return Scheme(m.Scheme)
 }
 
 // ResolveSpec 从 manifest 解析布局参数：v2 → SpecV2（parity-first、恒 64 parity）；
 // v3 → SpecV3(m.Version>=3 时 M2 字段即 M2Cap)。
+// 注意：仅 rs-dual 有组/块布局；gcm-only/rs-strong 的尺寸不经 Spec，
+// 直接用 layout.GCMOnlySize / layout.StrongSize 计算。
 func (m *Manifest) ResolveSpec() layout.Spec {
 	if m.Version >= FormatVersionV3 {
 		return layout.SpecV3(int64(m.M2))
@@ -80,9 +107,25 @@ func (m *Manifest) ResolveSpec() layout.Spec {
 	return layout.SpecV2()
 }
 
-// Validate 校验 manifest 参数与文件尺寸一致性（尺寸不符即截断/追加）；
-// 尺寸期望由 ResolveSpec 解析出的布局参数计算（组数、末组块数等随版本集中到 layout.Spec）。
+// Validate 校验 manifest 参数与文件尺寸一致性（尺寸不符即截断/追加）。
+// 按 scheme 分派：rs-dual（含 v2 兼容）走组/块布局校验；
+// gcm-only/rs-strong 走各自的文件级单 blob 布局公式。
 func (m *Manifest) Validate(size, trailerLen int64) error {
+	switch m.ResolveScheme() {
+	case SchemeGCMOnly:
+		return m.validateGCMOnly(size, trailerLen)
+	case SchemeRSStrong:
+		return m.validateRSStrong(size, trailerLen)
+	case SchemeRSDual:
+		return m.validateRSDual(size, trailerLen)
+	default:
+		return errors.ErrUnsupportedFormat
+	}
+}
+
+// validateRSDual rs-dual（含 v2）尺寸校验：期望由 ResolveSpec 解析出的布局参数计算
+// （组数、末组块数等随版本集中到 layout.Spec）。
+func (m *Manifest) validateRSDual(size, trailerLen int64) error {
 	if m.Version != FormatVersion && m.Version != FormatVersionV3 ||
 		m.K != layout.DataShards || m.M != layout.ParityShards ||
 		m.K2 != layout.FileGroupChunks ||
@@ -108,6 +151,52 @@ func (m *Manifest) Validate(size, trailerLen int64) error {
 		}
 	}
 	if expect := m.ResolveSpec().TotalBlobCount(m.ChunkCount)*layout.BlobDiskSize + trailerLen; expect != size {
+		return errors.ErrNoManifest // 尺寸对不上：截断或追加
+	}
+	return nil
+}
+
+// validateGCMOnly gcm-only 尺寸校验：size == 16 + plainSize + 16 + trailerLen。
+// 无 RS/无分块——rs-dual 专有字段必须为零。
+func (m *Manifest) validateGCMOnly(size, trailerLen int64) error {
+	if m.Version != FormatVersionV3 {
+		return errors.ErrUnsupportedFormat
+	}
+	if m.K != 0 || m.M != 0 || m.K2 != 0 || m.M2 != 0 ||
+		m.ShardSize != 0 || m.ChunkPlain != 0 || m.ChunkCount != 0 ||
+		m.KStrong != 0 || m.MStrong != 0 {
+		return errors.ErrUnsupportedFormat
+	}
+	if m.PlainSize < 0 {
+		return errors.ErrUnsupportedFormat
+	}
+	if expect := layout.GCMOnlySize(m.PlainSize, trailerLen); expect != size {
+		return errors.ErrNoManifest // 尺寸对不上：截断或追加
+	}
+	return nil
+}
+
+// validateRSStrong rs-strong 尺寸校验：size == 96×(shardSize+16) + trailerLen，
+// shardSize = ceil((32+plainSize+16)/32)。k/m 复用为 rs-strong 的 RS(32,64) 维度
+// （无"块"概念，同一对值的不同语义），与 ks/ms 冗余记录交叉校验。
+func (m *Manifest) validateRSStrong(size, trailerLen int64) error {
+	if m.Version != FormatVersionV3 {
+		return errors.ErrUnsupportedFormat
+	}
+	if m.K != layout.KStrong || m.M != layout.MStrong ||
+		m.KStrong != layout.KStrong || m.MStrong != layout.MStrong {
+		return errors.ErrUnsupportedFormat
+	}
+	if m.K2 != 0 || m.M2 != 0 || m.ChunkPlain != 0 || m.ChunkCount != 0 {
+		return errors.ErrUnsupportedFormat
+	}
+	if m.PlainSize < 0 {
+		return errors.ErrUnsupportedFormat
+	}
+	if m.ShardSize != int(layout.StrongShardSize(m.PlainSize)) {
+		return errors.ErrUnsupportedFormat
+	}
+	if expect := layout.StrongSize(m.PlainSize, trailerLen); expect != size {
 		return errors.ErrNoManifest // 尺寸对不上：截断或追加
 	}
 	return nil

@@ -15,27 +15,40 @@ import (
 // Cache RS 编码器缓存（并发安全）。
 // files 按 (k, m) 二元组键控：map[[2]int] 语义清晰且天然无碰撞
 // （文件级编码器由数据片数 k 与校验片数 m 两个维度共同唯一确定）。
+// strong 是 rs-strong scheme 的固定 RS(32,64) 编码器（构造时一并 warmup）。
 type Cache struct {
-	mu    sync.Mutex
-	intra reedsolomon.Encoder
-	files map[[2]int]reedsolomon.Encoder
+	mu     sync.Mutex
+	intra  reedsolomon.Encoder
+	strong reedsolomon.Encoder
+	files  map[[2]int]reedsolomon.Encoder
 }
 
-// NewCache 构造缓存并完成 intra 编码器 warmup
+// NewCache 构造缓存并完成 intra / strong 编码器 warmup
 // （触发 RS 库延迟初始化，避免多 worker 首次并发 Encode 的内部竞态）。
 func NewCache() (*Cache, error) {
 	intra, err := reedsolomon.New(layout.DataShards, layout.ParityShards)
 	if err != nil {
 		return nil, fmt.Errorf("secvault: intra codec: %w", err)
 	}
-	if err := warmup(intra); err != nil {
+	if err := warmupN(intra, layout.ShardsPerBlob); err != nil {
 		return nil, fmt.Errorf("secvault: intra warmup: %w", err)
 	}
-	return &Cache{intra: intra, files: map[[2]int]reedsolomon.Encoder{}}, nil
+	strong, err := reedsolomon.New(layout.KStrong, layout.MStrong) // rs-strong 固定 RS(32,64)
+	if err != nil {
+		return nil, fmt.Errorf("secvault: strong codec: %w", err)
+	}
+	if err := warmupN(strong, layout.StrongSlots); err != nil {
+		return nil, fmt.Errorf("secvault: strong warmup: %w", err)
+	}
+	return &Cache{intra: intra, strong: strong, files: map[[2]int]reedsolomon.Encoder{}}, nil
 }
 
 // Intra 返回块内 RS(256,128) 编码器。
 func (c *Cache) Intra() reedsolomon.Encoder { return c.intra }
+
+// Strong 返回 rs-strong 固定 RS(32,64) 编码器（warmup 过）。
+// 变长 shardSize 对 reedsolomon 透明（shard 为任意等长 []byte），无需单独实例化。
+func (c *Cache) Strong() reedsolomon.Encoder { return c.strong }
 
 // File 返回文件级 RS(k, m) 编码器（按 (k, m) 缓存）。
 // k ∈ [1, FileGroupChunks]，m ∈ [1, FileParityShards]。
@@ -63,8 +76,15 @@ func (c *Cache) File(k, m int) (reedsolomon.Encoder, error) {
 	return rs, nil
 }
 
+// warmup 用默认 shard 数（ShardsPerBlob=384）预热编码器。
 func warmup(enc reedsolomon.Encoder) error {
-	shards := make([][]byte, layout.ShardsPerBlob)
+	return warmupN(enc, layout.ShardsPerBlob)
+}
+
+// warmupN 用 n 个 shard 预热编码器（触发 RS 库延迟初始化）。
+// shard 总数不同（intra=384 / strong=96）需分开构造预热缓冲。
+func warmupN(enc reedsolomon.Encoder, n int) error {
+	shards := make([][]byte, n)
 	for i := range shards {
 		shards[i] = make([]byte, 64)
 	}

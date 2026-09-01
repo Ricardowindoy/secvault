@@ -69,7 +69,14 @@ func Open(src io.ReaderAt, masterKey []byte) (*Container, error) {
 	if err := man.Validate(size, trailerLen); err != nil {
 		return nil, err
 	}
-	aead, err := crypto.NewGCM(crypto.DeriveKey(masterKey, tr.FileID, "secvault/chunk/v1"))
+	// 数据 AEAD 的 HKDF info 按 scheme 分派：gcm-only 用独立域（"secvault/gcm/v1"，
+	// 区别于 chunk/manifest），rs-dual 与 rs-strong（批次2，复用 chunk 块头）共用
+	// "secvault/chunk/v1"。
+	info := "secvault/chunk/v1"
+	if man.ResolveScheme() == format.SchemeGCMOnly {
+		info = "secvault/gcm/v1"
+	}
+	aead, err := crypto.NewGCM(crypto.DeriveKey(masterKey, tr.FileID, info))
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +125,9 @@ func resolveSize(src io.ReaderAt) (int64, error) {
 func (c *Container) DataChunks(g int64) int64 {
 	return layout.DataChunksInGroup(g, c.Man.ChunkCount)
 }
+
+// Scheme 容器 scheme（rs-dual 走块级路径；gcm-only/rs-strong 走文件级单 blob 路径）。
+func (c *Container) Scheme() format.Scheme { return c.Man.ResolveScheme() }
 
 // GatherBlob 读取整块并逐槽验证 tag。payloads/tags 是同一缓冲的视图。
 func (c *Container) GatherBlob(index int64) (payloads, tags [][]byte, bad []int, err error) {

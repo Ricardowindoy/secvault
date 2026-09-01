@@ -1,7 +1,7 @@
 # secvault 格式规范 v3（设计定稿）
 
 > **实现状态**：v3.0（rs-dual 自适应文件级 parity，`WithFileParity(m)` + data-first 布局）**已实现**（commit 05c642b）；
-> gcm-only / rs-strong 两 scheme 尚未实现。现行 v2 见 `FORMAT.md`。
+> gcm-only（`WithRePull()`）/ rs-strong（`WithStrongRS()`）两 scheme **已实现**（v3 phase 2：SmallFileSink 单 blob 缓冲后端 + Container.LoadAll 分派 + scheme 感知 Validate/Scrub）。现行 v2 见 `FORMAT.md`。
 > v3 按**内容类别**分三种容器 scheme：`gcm-only` / `rs-strong` / `rs-dual`。
 > 设计过程：从 v2 小文件浪费出发，历经"自适应 parity（v3.0）→ 变长末块（v3.1）→ mirror"多轮方案，
 > 最终按用户确认的 p91 场景定稿为三类别方案（v3.1 变长末块与 mirror 均被否决，理由见 §3.4 / §8）。
@@ -247,7 +247,7 @@ type Manifest struct {
 4. `engine`：pipeline 末组 parity 数按 `LastGroupParity`；reader/scrub 按 v3.0 数学定位。
 5. 单测：末组 kLast=1/64/128 边界 + 恢复对照。
 
-### 阶段 2：gcm-only + rs-strong（1~2 周，比 v3.1 变长末块简单——单 blob 无流水线）
+### 阶段 2：gcm-only + rs-strong（**已实现**：WithRePull/WithStrongRS + SmallFileSink 单 blob 缓冲后端 + Container.LoadAll 分派 + scheme 感知 Validate/Scrub；详见 DESIGN-v3-phase2.md。原估 1~2 周，单 blob 无流水线）
 1. `layout`：gcm-only/rs-strong 布局常量与尺寸函数。
 2. `codec`：新增固定 RS(32,64) 编码器（warmup 一次）；shardSize 变长参数化。
 3. `format`：scheme 分派 + 两种正文头（SVGO/SVC1）。
